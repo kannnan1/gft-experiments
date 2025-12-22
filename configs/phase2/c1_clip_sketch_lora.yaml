@@ -1,0 +1,45 @@
+# C1.2: CLIP ViT-B/32 LoRA r=16 on ImageNet→Sketch
+
+experiment:
+  name: "clip_vit_b32_lora_r16_sketch"
+  phase: 2
+  exp_id: "C1.2"
+  seeds: [42, 123, 456]
+
+model:
+  architecture: "clip"
+  clip_model: "openai/clip-vit-base-patch32"
+  method: "lora"
+  rank: 16
+  pretrained: true
+
+data:
+  base_task: "imagenet"
+  adapt_task: "imagenet_sketch"
+  num_classes: 1000
+  batch_size: 64
+  num_workers: 4
+
+training:
+  epochs: 10
+  learning_rate: 0.00005
+  optimizer: "adamw"
+  weight_decay: 0.01
+  scheduler: "cosine"
+  warmup_epochs: 2
+
+logging:
+  use_wandb: true
+  wandb_project: "gft_experiments"
+  log_interval: 10
+  save_interval: 5
+
+evaluation:
+  eval_base_task: true
+  eval_adaptation_task: true
+  compute_geometric_metrics: true
+
+paths:
+  data_dir: "./data"
+  checkpoint_dir: "./results/checkpoints"
+  log_dir: "./results/logs"

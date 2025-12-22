@@ -1,0 +1,45 @@
+# B1.2: BLIP-base LoRA r=16 on COCO→Medical Captions
+
+experiment:
+  name: "blip_base_lora_r16_medical"
+  phase: 3
+  exp_id: "B1.2"
+  seeds: [42, 123, 456]
+
+model:
+  architecture: "blip"
+  blip_model: "Salesforce/blip-image-captioning-base"
+  method: "lora"
+  rank: 16
+  pretrained: true
+  adapt_text_decoder: false
+
+data:
+  base_task: "coco"
+  adapt_task: "medical"
+  batch_size: 32
+  num_workers: 4
+
+training:
+  epochs: 20
+  learning_rate: 0.00005
+  optimizer: "adamw"
+  weight_decay: 0.01
+  scheduler: "cosine"
+  warmup_epochs: 3
+
+logging:
+  use_wandb: true
+  wandb_project: "gft_experiments"
+  log_interval: 10
+  save_interval: 5
+
+evaluation:
+  eval_base_task: true
+  eval_adaptation_task: true
+  compute_geometric_metrics: false
+
+paths:
+  data_dir: "./data"
+  checkpoint_dir: "./results/checkpoints"
+  log_dir: "./results/logs"

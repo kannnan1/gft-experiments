@@ -1,0 +1,43 @@
+# Base configuration template for GiFT experiments
+
+experiment:
+  name: "base_experiment"
+  phase: 1
+  exp_id: "BASE"
+  seeds: [42, 123, 456]
+
+model:
+  architecture: "resnet18"  # resnet18, resnet50, clip, blip
+  method: "lora"  # lora, gft, adapter, full_ft
+  rank: 8  # rank for low-rank methods
+  pretrained: true
+
+data:
+  base_task: "cifar10"  # cifar10, cifar100, imagenet
+  adapt_task: "even_odd"  # even_odd, animal_vehicle, living_nonliving, null
+  batch_size: 128
+  num_workers: 4
+
+training:
+  epochs: 50
+  learning_rate: 0.0001
+  optimizer: "adamw"  # adamw, sgd
+  weight_decay: 0.01
+  scheduler: "cosine"  # cosine, step, null
+  warmup_epochs: 5
+
+logging:
+  use_wandb: true
+  wandb_project: "gft_experiments"
+  log_interval: 10  # batches
+  save_interval: 10  # epochs
+
+evaluation:
+  eval_base_task: true
+  eval_adaptation_task: true
+  compute_geometric_metrics: false
+
+paths:
+  data_dir: "./data"
+  checkpoint_dir: "./results/checkpoints"
+  log_dir: "./results/logs"
