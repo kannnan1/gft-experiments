@@ -1,0 +1,43 @@
+# R3.4: ResNet-50 LoRA r=32 on CIFAR-100 → Coarse (20 superclasses)
+
+experiment:
+  name: "resnet50_lora_r32_cifar100_coarse"
+  phase: 1
+  exp_id: "R3.4"
+  seeds: [42, 123, 456]
+
+model:
+  architecture: "resnet50"
+  method: "lora"
+  rank: 32
+  pretrained: true
+
+data:
+  base_task: "cifar100"
+  adapt_task: "coarse"
+  batch_size: 128
+  num_workers: 4
+
+training:
+  epochs: 50
+  learning_rate: 0.0001
+  optimizer: "adamw"
+  weight_decay: 0.01
+  scheduler: "cosine"
+  warmup_epochs: 5
+
+logging:
+  use_wandb: true
+  wandb_project: "gft_experiments"
+  log_interval: 10
+  save_interval: 10
+
+evaluation:
+  eval_base_task: true
+  eval_adaptation_task: true
+  compute_geometric_metrics: true
+
+paths:
+  data_dir: "./data"
+  checkpoint_dir: "./results/checkpoints"
+  log_dir: "./results/logs"

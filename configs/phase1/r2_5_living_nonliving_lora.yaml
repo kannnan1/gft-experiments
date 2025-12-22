@@ -1,0 +1,43 @@
+# R2.5: ResNet-18 LoRA r=8 on CIFAR-10 Living/Non-living
+
+experiment:
+  name: "resnet18_lora_r8_living_nonliving"
+  phase: 1
+  exp_id: "R2.5"
+  seeds: [42, 123, 456]
+
+model:
+  architecture: "resnet18"
+  method: "lora"
+  rank: 8
+  pretrained: true
+
+data:
+  base_task: "cifar10"
+  adapt_task: "living_nonliving"
+  batch_size: 128
+  num_workers: 4
+
+training:
+  epochs: 50
+  learning_rate: 0.0001
+  optimizer: "adamw"
+  weight_decay: 0.01
+  scheduler: "cosine"
+  warmup_epochs: 5
+
+logging:
+  use_wandb: true
+  wandb_project: "gft_experiments"
+  log_interval: 10
+  save_interval: 10
+
+evaluation:
+  eval_base_task: true
+  eval_adaptation_task: true
+  compute_geometric_metrics: true
+
+paths:
+  data_dir: "./data"
+  checkpoint_dir: "./results/checkpoints"
+  log_dir: "./results/logs"

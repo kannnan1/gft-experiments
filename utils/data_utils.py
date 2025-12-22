@@ -134,6 +134,11 @@ def get_dataset(
                 5: 0, 6: 0, 7: 0, 8: 1, 9: 1
             }
             dataset = BinaryTaskDataset(dataset, class_mapping)
+        
+        elif task_type == 'gt5_lt5':
+            # Classes >= 5 -> 1, Classes < 5 -> 0
+            class_mapping = {i: (1 if i >= 5 else 0) for i in range(10)}
+            dataset = BinaryTaskDataset(dataset, class_mapping)
     
     elif dataset_name == 'cifar100':
         transform = get_cifar100_transforms(train=train)
@@ -204,7 +209,7 @@ def get_num_classes(dataset_name: str, task_type: Optional[str] = None) -> int:
     Returns:
         Number of classes
     """
-    if task_type in ['even_odd', 'animal_vehicle', 'living_nonliving']:
+    if task_type in ['even_odd', 'animal_vehicle', 'living_nonliving', 'gt5_lt5']:
         return 2
     elif dataset_name == 'cifar10':
         return 10
