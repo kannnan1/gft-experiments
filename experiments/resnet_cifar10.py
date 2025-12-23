@@ -119,14 +119,17 @@ class ResNetCIFAR10Experiment(BaseExperiment):
             self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
             self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
             
-            # 3. Unfreeze FC head (for co-adaptation)
-            self.model.fc.weight.requires_grad = True
-            self.model.fc.bias.requires_grad = True
-            self.logger.info("  ✓ FC head is TRAINABLE (for co-adaptation)")
+            # 3. FC head remains FROZEN
+            # This is critical: if the head is trainable, the model will just 
+            # adjust the head weights/biases and never "pressure" the backbone 
+            # to adapt, leading to artificially low forgetting.
+            self.model.fc.weight.requires_grad = False
+            self.model.fc.bias.requires_grad = False
+            self.logger.info("  ✓ FC head (10 classes) is FROZEN (forcing backbone to adapt)")
             
             # Log number of trainable parameters
             trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-            self.logger.info(f"  ✓ Trainable parameters in Stage 2: {trainable_params:,}")
+            self.logger.info(f"  ✓ Trainable parameters in Stage 2 (PEFT only): {trainable_params:,}")
             
         elif method == 'full_ft':
             # Full fine-tuning: everything is trainable
@@ -160,16 +163,17 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         
         self.logger.info("Adaptation setup complete!")
         self.logger.info(f"  - Backbone: {method.upper()} applied to layer3, layer4")
-        self.logger.info(f"  - FC head: Trainable (10 classes)")
-        self.logger.info(f"  - Training: Binary task via logit aggregation")
-        self.logger.info(f"  - Evaluation: Full 10-class for base task retention")
+        self.logger.info("  - FC head: FROZEN (10 classes)")
+        self.logger.info("  - Training: Binary task via Collision Mapping (slicing outputs to :2)")
+        self.logger.info("  - Evaluation: Full 10-class for base task retention")
     
     def evaluate_base_task(self) -> float:
         """Evaluate on original CIFAR-10 (10-class) task.
         
-        NEW APPROACH: No head swapping needed!
-        The model still has its 10-class head, so we just evaluate directly.
-        This tests if the adapted backbone can still produce good features for base task.
+        COLISSION MAPPING EVALUATION:
+        We use the full original 10-class head. This tests whether 
+        features for all classes (even those not used in Stage 2) 
+        have been warped/smashed by the adaptation.
         
         Returns:
             Accuracy on base task
@@ -185,14 +189,20 @@ class ResNetCIFAR10Experiment(BaseExperiment):
             task_type=None  # Original 10-class
         )
         
-        # Evaluate directly - no head swapping needed!
-        # The model still has its 10-class fc head
+        # Temporarily clear aggregation mapping to use standard evaluate (full 10-class)
+        orig_mapping = self.aggregation_mapping
+        self.aggregation_mapping = None
+        
         _, base_acc = self.evaluate(base_test_loader)
+        
+        # Restore mapping
+        self.aggregation_mapping = orig_mapping
         
         return base_acc
 
     def train_epoch(self, epoch: int) -> Tuple[float, float]:
-        """Train for one epoch with optional logit aggregation."""
+        """Train for one epoch with Collision Mapping."""
+        # Stage 1 or Full FT doesn't use aggregation mapping
         if self.aggregation_mapping is None:
             return super().train_epoch(epoch)
             
@@ -200,21 +210,26 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         self.metrics_tracker.reset()
         self.progress.start_epoch(epoch)
         
+        # Determine number of classes for Collision Mapping
+        num_adapted_classes = len(self.aggregation_mapping)
+        
         for batch_idx, (inputs, targets) in enumerate(self.train_loader):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             
             self.optimizer.zero_grad()
             outputs = self.model(inputs)  # Base task logits [B, 10]
             
-            # Aggregate to binary task logits [B, 2]
-            aggregated_outputs = aggregate_logits(outputs, self.aggregation_mapping)
-            loss = self.criterion(aggregated_outputs, targets)
+            # COLLISION MAPPING: 
+            # Slice the base output to force new features into old neurons.
+            # This creates the "Adaptation Pressure" (The POC approach).
+            collision_outputs = outputs[:, :num_adapted_classes]
             
+            loss = self.criterion(collision_outputs, targets)
             loss.backward()
             self.optimizer.step()
             
-            # Compute accuracy on aggregation
-            acc = compute_accuracy(aggregated_outputs, targets)
+            # Compute accuracy on adaptation task
+            acc = compute_accuracy(collision_outputs, targets)
             
             self.metrics_tracker.update_train(loss.item(), acc)
             
@@ -230,13 +245,9 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         return avg_loss, avg_acc
 
     def evaluate(self, data_loader: torch.utils.data.DataLoader) -> Tuple[float, float]:
-        """Evaluate model with optional logit aggregation."""
-        if self.aggregation_mapping is None or data_loader == self.val_loader: # Use aggregation only for Stage 2 adaptation task
-             # Actually, we should check if we are in Stage 2 AND if the data_loader is for the adaptation task
-             # But a simpler way is to check if the targets in the data_loader are already binary or not.
-             # In our setup, self.val_loader in Stage 2 has binary targets.
-             pass
-        else:
+        """Evaluate model with optional Collision Mapping."""
+        # If no mapping (Stage 1 or Base Review), use standard evaluation
+        if self.aggregation_mapping is None:
             return super().evaluate(data_loader)
 
         self.model.eval()
@@ -244,16 +255,19 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         correct = 0
         total = 0
         
+        # Determine number of classes for Collision Mapping
+        num_adapted_classes = len(self.aggregation_mapping)
+        
         with torch.no_grad():
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 outputs = self.model(inputs)
                 
-                # Check if we need aggregation
-                # Targets size is [B]. If targets max >= num_classes_in_outputs, we might have an issue.
-                # In Stage 2 training, targets are binary (0, 1). Outputs are 10-class.
-                if self.aggregation_mapping is not None and targets.max() < len(self.aggregation_mapping):
-                    outputs = aggregate_logits(outputs, self.aggregation_mapping)
+                # Check if we are evaluating the ADAPTATION task (targets are 0, 1 etc)
+                # If targets max is low (within num_adapted_classes), we use the Collision Neurons.
+                # If we are evaluating the BASE task, this loop is not called (self.aggregation_mapping is None)
+                if targets.max() < num_adapted_classes:
+                    outputs = outputs[:, :num_adapted_classes]
                 
                 loss = self.criterion(outputs, targets)
                 total_loss += loss.item()
@@ -435,14 +449,14 @@ class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
             self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
             self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
             
-            # 3. FC head remains trainable
-            self.model.fc.weight.requires_grad = True
-            self.model.fc.bias.requires_grad = True
-            self.logger.info("  ✓ FC head (100 classes) is TRAINABLE")
+            # 3. FC head remains FROZEN
+            self.model.fc.weight.requires_grad = False
+            self.model.fc.bias.requires_grad = False
+            self.logger.info("  ✓ FC head (100 classes) is FROZEN")
             
             # Log number of trainable parameters
             trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-            self.logger.info(f"  ✓ Trainable parameters in Stage 2: {trainable_params:,}")
+            self.logger.info(f"  ✓ Trainable parameters in Stage 2 (PEFT only): {trainable_params:,}")
             
         elif method == 'full_ft':
             for param in self.model.parameters():

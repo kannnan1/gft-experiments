@@ -177,7 +177,10 @@ def get_class_aggregation_mapping(task_type: str, num_base_classes: int) -> Dict
 
 
 def aggregate_logits(logits: torch.Tensor, aggregation_mapping: Dict[int, List[int]]) -> torch.Tensor:
-    """Aggregate base task logits to adapted task logits.
+    """Aggregate base task logits to adapted task logits using LogSumExp.
+    
+    This is mathematically equivalent to summing probabilities in the softmax space:
+    log(sum(exp(logits_i)))
     
     Args:
         logits: Base task logits [batch_size, num_base_classes]
@@ -192,7 +195,7 @@ def aggregate_logits(logits: torch.Tensor, aggregation_mapping: Dict[int, List[i
     aggregated = torch.zeros(batch_size, num_adapted_classes, device=logits.device)
     
     for adapted_class, base_classes in aggregation_mapping.items():
-        # Sum logits for all base classes that map to this adapted class
-        aggregated[:, adapted_class] = logits[:, base_classes].sum(dim=1)
+        # Use torch.logsumexp for numerical stability
+        aggregated[:, adapted_class] = torch.logsumexp(logits[:, base_classes], dim=1)
     
     return aggregated
