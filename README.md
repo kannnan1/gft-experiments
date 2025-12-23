@@ -47,7 +47,7 @@ python scripts/run_experiment.py --config configs/phase1/r1_resnet_lora_r16.yaml
 
 ```bash
 # Run all Phase 1 experiments (overnight)
-bash scripts/run_phase1.sh
+bash scripts/run_phase1_complete.sh
 ```
 
 ### Aggregating Results
@@ -81,13 +81,13 @@ gft_experiments/
 │   └── phase1/               # Phase 1 configs
 ├── scripts/                   # Execution scripts
 │   ├── run_experiment.py     # Main runner
-│   ├── run_phase1.sh         # Batch Phase 1
+│   ├── run_phase1_complete.sh         # Batch Phase 1
 │   └── aggregate_results.py  # Results aggregation
 └── results/                   # Results directory
     ├── logs/                 # Training logs
     ├── checkpoints/          # Model checkpoints
     ├── tables/               # Result tables
-    └── figures/              # Plots and visualizations
+    └── plots/                # Plots and visualizations
 ```
 
 ## Configuration
