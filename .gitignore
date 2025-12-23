@@ -64,3 +64,11 @@ nohup.out
 tmp/
 temp/
 *.tmp
+DEVICE_CONFIGURATION.md
+push_to_github.sh
+PHASE2_PHASE3_SETUP.md
+scripts/run_phase2.sh
+scripts/run_phase3.sh
+scripts/run_phase1.sh
+scripts/run_all_phases.sh
+scripts/run_phase1_complete_copy.sh

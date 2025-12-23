@@ -20,13 +20,50 @@ echo "Working directory: $BASE_DIR"
 echo "Seeds: $SEEDS"
 echo ""
 echo "This will run:"
-echo "  - R1.1-R1.7: Core comparison (Even/Odd split)"
+echo "  - R1.1-R1.5: Core comparison (Even/Odd split)"
 echo "  - R2.1-R2.6: Alternative splits (Animal/Vehicle, >5 vs <5, Living/Non-living)"
-echo "  - R3.2-R3.5: ResNet-50 on CIFAR-100"
 echo ""
-echo "Total: 18 experiment configurations × 3 seeds = 54 runs"
-echo "Estimated time: ~12-15 hours on GPU"
-echo ""
+
+
+
+# ============================================
+# R1.x: Core Comparison (Even/Odd)
+# ============================================
+
+echo "=========================================="
+echo "R1.x: Core Comparison (Even/Odd Split)"
+echo "=========================================="
+
+# R1.1: Baseline
+echo "Running R1.1 (Baseline)..."
+for seed in $SEEDS; do
+    python scripts/run_experiment.py --config configs/phase1/r1_1_baseline.yaml --seed $seed
+done
+
+# R1.2: LoRA r=8 (DONE - can skip if already run)
+echo "Running R1.2 (LoRA r=8)..."
+for seed in $SEEDS; do
+    python scripts/run_experiment.py --config configs/phase1/r1_2_lora_r8.yaml --seed $seed
+done
+
+# R1.3: GFT r=8 (DONE - can skip if already run)
+echo "Running R1.3 (GFT r=8)..."
+for seed in $SEEDS; do
+    python scripts/run_experiment.py --config configs/phase1/r1_3_gft_r8.yaml --seed $seed
+done
+
+# R1.4: LoRA r=16
+echo "Running R1.4 (LoRA r=16)..."
+for seed in $SEEDS; do
+    python scripts/run_experiment.py --config configs/phase1/r1_4_lora_r16.yaml --seed $seed
+done
+
+# R1.5: GFT r=16
+echo "Running R1.5 (GFT r=16)..."
+for seed in $SEEDS; do
+    python scripts/run_experiment.py --config configs/phase1/r1_5_gft_r16.yaml --seed $seed
+done
+
 
 # ============================================
 # R2.x: Alternative Splits
@@ -39,10 +76,10 @@ echo "=========================================="
 
 # R2.1-R2.2: Animal/Vehicle
 echo "Running R2.1-R2.2 (Animal/Vehicle)..."
-#for seed in $SEEDS; do
-#    python scripts/run_experiment.py --config configs/phase1/r2_animal_vehicle_lora.yaml --seed $seed
-#    python scripts/run_experiment.py --config configs/phase1/r2_animal_vehicle_gft.yaml --seed $seed
-#done
+for seed in $SEEDS; do
+   python scripts/run_experiment.py --config configs/phase1/r2_animal_vehicle_lora.yaml --seed $seed
+   python scripts/run_experiment.py --config configs/phase1/r2_animal_vehicle_gft.yaml --seed $seed
+done
 
 # R2.3-R2.4: >5 vs <5
 echo "Running R2.3-R2.4 (>5 vs <5)..."
