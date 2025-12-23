@@ -26,6 +26,8 @@ training:
   scheduler: "cosine"  # cosine, step, null
   warmup_epochs: 5
 
+  skip_stage1: false
+  stage1_checkpoint: ""
 logging:
   use_wandb: true
   wandb_project: "gft_finetuning"
