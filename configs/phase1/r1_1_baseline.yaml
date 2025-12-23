@@ -27,6 +27,7 @@ training:
 
   skip_stage1: false
   stage1_checkpoint: ""
+  
 logging:
   use_wandb: true
   wandb_project: "gft_finetuning"

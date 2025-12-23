@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any
 from torchvision import models
+import shutil
+from pathlib import Path
 
 from experiments.base_experiment import BaseExperiment
 from models import LoRALinear, GeometricLinear
@@ -193,7 +195,7 @@ class ResNetCIFAR10Experiment(BaseExperiment):
             
             # Load pre-trained model if path provided
             checkpoint_path = self.config['training'].get('stage1_checkpoint')
-            if checkpoint_path:
+            if checkpoint_path and Path(checkpoint_path).exists():
                 self.logger.info(f"Loading base model from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
@@ -201,7 +203,12 @@ class ResNetCIFAR10Experiment(BaseExperiment):
                 else:
                     self.model.load_state_dict(checkpoint)
             else:
-                self.logger.warning("skip_stage1 is True but stage1_checkpoint not provided. Using current model state.")
+                if checkpoint_path:
+                    self.logger.error(f"Checkpoint path {checkpoint_path} not found!")
+                self.logger.warning("Using current model state for adaptation.")
+            
+            # Setup data for evaluation of base task
+            self.setup_data()
             
             # Evaluate base task to get accuracy
             _, self.base_task_acc = self.evaluate(self.test_loader)
@@ -217,12 +224,26 @@ class ResNetCIFAR10Experiment(BaseExperiment):
             # Save base task accuracy
             _, self.base_task_acc = self.evaluate(self.test_loader)
             self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
+            
+            # Save Stage 1 model explicitly
+            best_path = self.checkpoint_manager.get_best_checkpoint_path()
+            if best_path:
+                stage1_path = Path(best_path).parent / "stage1_best.pt"
+                shutil.copy(best_path, stage1_path)
+                self.logger.info(f"Saved Stage 1 best model to {stage1_path}")
         
         # Stage 2: Adapt to binary task
         self.adapt_to_binary_task()
         
         # Train on adaptation task
         super().run(finish=True)
+        
+        # Save Stage 2 model explicitly
+        best_path = self.checkpoint_manager.get_best_checkpoint_path()
+        if best_path:
+            stage2_path = Path(best_path).parent / "stage2_best.pt"
+            shutil.copy(best_path, stage2_path)
+            self.logger.info(f"Saved Stage 2 best model to {stage2_path}")
     
     def final_evaluation(self):
         """Final evaluation with catastrophic forgetting metrics."""
@@ -359,13 +380,16 @@ class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
             self.logger.info("=" * 50)
             
             checkpoint_path = self.config['training'].get('stage1_checkpoint')
-            if checkpoint_path:
+            if checkpoint_path and Path(checkpoint_path).exists():
                 self.logger.info(f"Loading base model from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                     self.model.load_state_dict(checkpoint['model_state_dict'])
                 else:
                     self.model.load_state_dict(checkpoint)
+            
+            # Setup data for evaluation
+            self.setup_data()
             
             _, self.base_task_acc = self.evaluate(self.test_loader)
             self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
@@ -381,6 +405,13 @@ class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
             # Save base task accuracy
             _, self.base_task_acc = self.evaluate(self.test_loader)
             self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
+            
+            # Save Stage 1 model explicitly
+            best_path = self.checkpoint_manager.get_best_checkpoint_path()
+            if best_path:
+                stage1_path = Path(best_path).parent / "stage1_best.pt"
+                shutil.copy(best_path, stage1_path)
+                self.logger.info(f"Saved Stage 1 best model to {stage1_path}")
         
         # Stage 2: Adapt to coarse task
         self.adapt_to_binary_task()
@@ -388,6 +419,13 @@ class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
         # Train on adaptation task
         # Call BaseExperiment.run() again
         super(ResNetCIFAR10Experiment, self).run(finish=True)
+        
+        # Save Stage 2 model explicitly
+        best_path = self.checkpoint_manager.get_best_checkpoint_path()
+        if best_path:
+            stage2_path = Path(best_path).parent / "stage2_best.pt"
+            shutil.copy(best_path, stage2_path)
+            self.logger.info(f"Saved Stage 2 best model to {stage2_path}")
 
     def evaluate_base_task(self) -> float:
         """Evaluate on original CIFAR-100 (100-class) task."""

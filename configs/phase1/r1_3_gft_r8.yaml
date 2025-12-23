@@ -15,7 +15,7 @@ model:
 data:
   base_task: "cifar10"
   adapt_task: "even_odd"
-  batch_size: 128
+  batch_size: 1024
   num_workers: 4
 
 training:
@@ -26,8 +26,8 @@ training:
   scheduler: "cosine"
   warmup_epochs: 5
 
-  skip_stage1: false
-  stage1_checkpoint: ""
+  skip_stage1: true
+  stage1_checkpoint: "./results/checkpoints/R1.2_resnet18_lora_r8_even_odd_seed42/stage1_best.pt"
 logging:
   use_wandb: true
   wandb_project: "gft_finetuning"
