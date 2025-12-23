@@ -143,7 +143,7 @@ Experiments are configured via YAML files. See `configs/base_config.yaml` for al
 - Training time per epoch
 - GPU memory usage
 
-## VDI GPU Machine Setup
+## Machine Setup
 
 For running experiments overnight on a VDI GPU machine:
 
@@ -202,11 +202,13 @@ For running experiments overnight on a VDI GPU machine:
 If you use this code, please cite:
 
 ```bibtex
-@article{gft2024,
-  title={Geometric Fine-Tuning: Mitigating Catastrophic Forgetting via Metric-Preserving Adaptations},
-  author={Your Name},
+@article{gift2025,
+  title={Geometric Fine-Tuning (GFT): Decoupling Feature
+Metrics and Decision Geometry via Trainable Rotor
+Fields},
+  author={Agus Sudjianto, Kannan V. and others},
   journal={arXiv preprint},
-  year={2024}
+  year={2025}
 }
 ```
 
