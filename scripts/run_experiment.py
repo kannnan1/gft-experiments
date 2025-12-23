@@ -9,7 +9,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from experiments.resnet_cifar10 import ResNetCIFAR10Experiment, ResNetCIFAR10TwoStageExperiment
+from experiments.resnet_cifar10 import ResNetCIFAR10Experiment, ResNetCIFAR100Experiment
 from experiments.clip_adaptation import CLIPAdaptationExperiment
 from experiments.blip_captioning import BLIPCaptioningExperiment
 
@@ -45,19 +45,18 @@ def run_experiment(config_path: str, seed: int = None, resume: str = None):
     
     # Determine experiment type based on config
     architecture = config['model']['architecture']
+    base_task = config['data']['base_task']
     
     if architecture == 'clip':
         experiment_class = CLIPAdaptationExperiment
     elif architecture == 'blip':
         experiment_class = BLIPCaptioningExperiment
-    elif config['data']['base_task'] == 'cifar10':
-        # Use two-stage experiment for catastrophic forgetting measurement
-        if config['evaluation']['eval_base_task']:
-            experiment_class = ResNetCIFAR10TwoStageExperiment
-        else:
-            experiment_class = ResNetCIFAR10Experiment
+    elif base_task == 'cifar10':
+        experiment_class = ResNetCIFAR10Experiment
+    elif base_task == 'cifar100':
+        experiment_class = ResNetCIFAR100Experiment
     else:
-        raise ValueError(f"Unsupported architecture/task: {architecture}/{config['data']['base_task']}")
+        raise ValueError(f"Unsupported architecture/task: {architecture}/{base_task}")
     
     # Run experiment for each seed
     for exp_seed in config['experiment']['seeds']:

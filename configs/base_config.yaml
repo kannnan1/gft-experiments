@@ -41,3 +41,8 @@ paths:
   data_dir: "./data"
   checkpoint_dir: "./results/checkpoints"
   log_dir: "./results/logs"
+
+# Device configuration (optional)
+# Options: 'auto' (default), 'cuda', 'mps', 'cpu'
+# 'auto' will automatically detect and use the best available device
+device: "auto"

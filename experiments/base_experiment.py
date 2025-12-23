@@ -35,8 +35,8 @@ class BaseExperiment(ABC):
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
         
-        # Device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Device configuration with priority: config > auto-detect
+        self.device = self._setup_device()
         
         # Initialize components (to be set by subclasses)
         self.model = None
@@ -56,6 +56,35 @@ class BaseExperiment(ABC):
         # Training state
         self.current_epoch = 0
         self.best_val_acc = 0.0
+    
+    def _setup_device(self) -> torch.device:
+        """Setup device with support for cuda, mps, and cpu.
+        
+        Priority: config setting > auto-detect
+        
+        Returns:
+            torch.device
+        """
+        # Check if device specified in config
+        device_name = self.config.get('device', 'auto')
+        
+        if device_name == 'auto':
+            # Auto-detect best available device
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+                print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device('mps')
+                print("Using Apple MPS device")
+            else:
+                device = torch.device('cpu')
+                print("Using CPU device")
+        else:
+            # Use specified device
+            device = torch.device(device_name)
+            print(f"Using specified device: {device_name}")
+        
+        return device
     
     @abstractmethod
     def setup_model(self):
