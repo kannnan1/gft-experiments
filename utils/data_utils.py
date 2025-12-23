@@ -149,8 +149,51 @@ def get_dataset(
             transform=transform
         )
         
-        # For coarse classification, we'd need to map fine to coarse labels
-        # This is handled separately if needed
+        # Mapping for 20 coarse superclasses (CIFAR-100 standard)
+        if task_type == 'coarse':
+            coarse_mapping = {
+                # aquatic mammals
+                4: 0, 30: 0, 55: 0, 72: 0, 95: 0,
+                # fish
+                1: 1, 32: 1, 67: 1, 73: 1, 91: 1,
+                # flowers
+                54: 2, 62: 2, 70: 2, 82: 2, 92: 2,
+                # food containers
+                9: 3, 10: 3, 16: 3, 28: 3, 61: 3,
+                # fruit and vegetables
+                0: 4, 51: 4, 53: 4, 57: 4, 83: 4,
+                # household electrical devices
+                22: 5, 39: 5, 40: 5, 86: 5, 87: 5,
+                # household furniture
+                5: 6, 20: 6, 25: 6, 84: 6, 94: 6,
+                # insects
+                6: 7, 7: 7, 14: 7, 18: 7, 24: 7,
+                # large carnivores
+                3: 8, 42: 8, 43: 8, 88: 8, 97: 8,
+                # large outdoor man-made objects
+                12: 9, 17: 9, 37: 9, 68: 9, 76: 9,
+                # large natural outdoor scenes
+                23: 10, 33: 10, 49: 10, 60: 10, 71: 10,
+                # large omnivores and herbivores
+                15: 11, 19: 11, 21: 11, 31: 11, 38: 11,
+                # medium-sized mammals
+                34: 12, 63: 12, 64: 12, 66: 12, 75: 12,
+                # non-insect invertebrates
+                26: 13, 45: 13, 77: 13, 79: 13, 99: 13,
+                # people
+                2: 14, 11: 14, 35: 14, 46: 14, 98: 14,
+                # reptiles
+                27: 15, 29: 15, 44: 15, 78: 15, 93: 15,
+                # small mammals
+                36: 16, 50: 16, 65: 16, 74: 16, 80: 16,
+                # trees
+                47: 17, 52: 17, 56: 17, 59: 17, 96: 17,
+                # vehicles 1
+                8: 18, 13: 18, 48: 18, 58: 18, 90: 18,
+                # vehicles 2
+                41: 19, 69: 19, 81: 19, 85: 19, 89: 19
+            }
+            dataset = BinaryTaskDataset(dataset, coarse_mapping)
     
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
@@ -211,6 +254,8 @@ def get_num_classes(dataset_name: str, task_type: Optional[str] = None) -> int:
     """
     if task_type in ['even_odd', 'animal_vehicle', 'living_nonliving', 'gt5_lt5']:
         return 2
+    elif task_type == 'coarse':
+        return 20
     elif dataset_name == 'cifar10':
         return 10
     elif dataset_name == 'cifar100':

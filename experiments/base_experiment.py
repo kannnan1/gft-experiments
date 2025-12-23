@@ -98,14 +98,7 @@ class BaseExperiment(ABC):
     
     def setup(self):
         """Setup all components for the experiment."""
-        # Setup model and data
-        self.setup_model()
-        self.setup_data()
-        
-        # Setup optimizer
-        self.setup_optimizer()
-        
-        # Setup logger
+        # 1. Setup logger first so subclasses can use it in setup_model/setup_data
         exp_name = f"{self.config['experiment']['exp_id']}_{self.config['model']['method']}_r{self.config['model'].get('rank', 0)}_seed{self.seed}"
         self.logger = ExperimentLogger(
             exp_name=exp_name,
@@ -116,7 +109,14 @@ class BaseExperiment(ABC):
             wandb_project=self.config['logging'].get('wandb_project', 'gft_experiments')
         )
         
-        # Log model info
+        # 2. Setup model and data
+        self.setup_model()
+        self.setup_data()
+        
+        # 3. Setup optimizer
+        self.setup_optimizer()
+        
+        # 4. Log model info and setup other utilities
         param_counts = count_parameters(self.model)
         self.logger.info(f"Model: {self.config['model']['architecture']}")
         self.logger.info(f"Method: {self.config['model']['method']}")
@@ -134,6 +134,7 @@ class BaseExperiment(ABC):
         self.checkpoint_manager = CheckpointManager(
             checkpoint_dir=self.config['paths']['checkpoint_dir'],
             exp_id=self.config['experiment']['exp_id'],
+            name=self.config['experiment']['name'],
             seed=self.seed
         )
     
@@ -252,10 +253,16 @@ class BaseExperiment(ABC):
         
         return avg_loss, avg_acc
     
-    def run(self):
+    def run(self, finish: bool = True):
         """Main training loop."""
         self.logger.info("Starting training...")
         start_time = time.time()
+        
+        # Early stopping and LR check parameters
+        patience = self.config['training'].get('early_stopping_patience', 10)
+        min_delta = self.config['training'].get('early_stopping_delta', 0.01)
+        lr_threshold = self.config['training'].get('lr_threshold', 1e-8)
+        self.patience_counter = 0
         
         for epoch in range(1, self.config['training']['epochs'] + 1):
             self.current_epoch = epoch
@@ -279,14 +286,13 @@ class BaseExperiment(ABC):
                 lr=current_lr
             )
             
-            # Update scheduler
-            if self.scheduler is not None:
-                self.scheduler.step()
-            
             # Save checkpoint
-            is_best = val_acc > self.best_val_acc
+            is_best = val_acc > (self.best_val_acc + min_delta)
             if is_best:
                 self.best_val_acc = val_acc
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
             
             if epoch % self.config['logging']['save_interval'] == 0 or is_best:
                 self.checkpoint_manager.save_checkpoint(
@@ -297,6 +303,20 @@ class BaseExperiment(ABC):
                     metrics={'val_acc': val_acc, 'val_loss': val_loss},
                     is_best=is_best
                 )
+            
+            # Update scheduler
+            if self.scheduler is not None:
+                self.scheduler.step()
+                
+            # Early stopping check
+            if self.patience_counter >= patience:
+                self.logger.info(f"Early stopping triggered at epoch {epoch} (No improvement for {patience} epochs)")
+                break
+                
+            # LR threshold check
+            if current_lr < lr_threshold:
+                self.logger.info(f"Training stopped at epoch {epoch}: Learning rate {current_lr:.2e} below threshold {lr_threshold:.2e}")
+                break
         
         # Finish progress tracking
         self.progress.finish()
@@ -306,11 +326,10 @@ class BaseExperiment(ABC):
         self.logger.info(f"Training complete! Total time: {total_time/60:.2f} minutes")
         self.logger.info(f"Best validation accuracy: {self.best_val_acc:.2f}%")
         
-        # Final evaluation
-        self.final_evaluation()
-        
-        # Finish logging
-        self.logger.finish()
+        # Final evaluation and finish logging if requested
+        if finish:
+            self.final_evaluation()
+            self.logger.finish()
     
     @abstractmethod
     def final_evaluation(self):

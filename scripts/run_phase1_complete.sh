@@ -57,13 +57,13 @@ done
 # R1.4: LoRA r=16
 echo "Running R1.4 (LoRA r=16)..."
 for seed in $SEEDS; do
-    python scripts/run_experiment.py --config configs/phase1/r1_resnet_lora_r16.yaml --seed $seed
+    python scripts/run_experiment.py --config configs/phase1/r1_4_lora_r16.yaml --seed $seed
 done
 
 # R1.5: GFT r=16
 echo "Running R1.5 (GFT r=16)..."
 for seed in $SEEDS; do
-    python scripts/run_experiment.py --config configs/phase1/r1_resnet_gft_r16.yaml --seed $seed
+    python scripts/run_experiment.py --config configs/phase1/r1_5_gft_r16.yaml --seed $seed
 done
 
 # R1.6: Adapter

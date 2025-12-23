@@ -17,6 +17,7 @@ class CheckpointManager:
         self,
         checkpoint_dir: str,
         exp_id: str,
+        name: str,
         seed: int,
         keep_last_n: int = 3,
         save_best: bool = True
@@ -26,11 +27,12 @@ class CheckpointManager:
         Args:
             checkpoint_dir: Base directory for checkpoints
             exp_id: Experiment ID
+            name: Experiment name
             seed: Random seed
             keep_last_n: Number of recent checkpoints to keep
             save_best: Whether to save best model separately
         """
-        self.checkpoint_dir = Path(checkpoint_dir) / f"{exp_id}_seed{seed}"
+        self.checkpoint_dir = Path(checkpoint_dir) / f"{exp_id}_{name}_seed{seed}"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         self.exp_id = exp_id
