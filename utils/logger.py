@@ -28,7 +28,7 @@ class ExperimentLogger:
         config: Dict[str, Any],
         log_dir: str = "./results/logs",
         use_wandb: bool = True,
-        wandb_project: str = "gft_experiments",
+        wandb_project: str = "gft_finetuning",
         resume: bool = False
     ):
         """Initialize experiment logger.

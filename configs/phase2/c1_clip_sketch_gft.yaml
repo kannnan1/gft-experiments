@@ -30,7 +30,7 @@ training:
 
 logging:
   use_wandb: true
-  wandb_project: "gft_experiments"
+  wandb_project: "gft_finetuning"
   log_interval: 10
   save_interval: 5
 

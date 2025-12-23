@@ -106,7 +106,7 @@ class BaseExperiment(ABC):
             config=self.config,
             log_dir=self.config['paths']['log_dir'],
             use_wandb=self.config['logging']['use_wandb'],
-            wandb_project=self.config['logging'].get('wandb_project', 'gft_experiments')
+            wandb_project=self.config['logging'].get('wandb_project', 'gft_finetuning')
         )
         
         # 2. Setup model and data
@@ -210,11 +210,17 @@ class BaseExperiment(ABC):
             # Update metrics
             self.metrics_tracker.update_train(loss.item(), acc)
             
-            # Update progress bar
+            # Update progress bar and log metrics
             if batch_idx % self.config['logging']['log_interval'] == 0:
                 self.progress.update_batch(
                     batch_idx,
                     {'loss': loss.item(), 'acc': acc}
+                )
+                
+                # Log batch metrics to wandb
+                self.logger.log_metrics(
+                    {'loss': loss.item(), 'accuracy': acc, 'lr': self.optimizer.param_groups[0]['lr']},
+                    prefix='batch/'
                 )
         
         avg_loss, avg_acc = self.metrics_tracker.get_average_train()
