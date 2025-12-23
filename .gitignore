@@ -64,6 +64,8 @@ nohup.out
 tmp/
 temp/
 *.tmp
+
+# Other files
 DEVICE_CONFIGURATION.md
 push_to_github.sh
 PHASE2_PHASE3_SETUP.md
