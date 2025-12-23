@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 from torchvision import models
 import shutil
 from pathlib import Path
@@ -11,6 +11,11 @@ from experiments.base_experiment import BaseExperiment
 from models import LoRALinear, GeometricLinear
 from utils.data_utils import create_data_loaders, get_num_classes
 from utils.metrics import compute_forgetting_metrics
+from utils.peft_utils import (
+    apply_peft_to_resnet_layer,
+    get_class_aggregation_mapping,
+    aggregate_logits
+)
 
 
 class ResNetCIFAR10Experiment(BaseExperiment):
@@ -34,6 +39,7 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         # Store base task accuracy for forgetting computation
         self.base_task_acc = None
         self.base_model_state = None
+        self.aggregation_mapping = None  # For aggregating base class logits to adapted task
     
     def setup_model(self):
         """Setup ResNet model for base task (10-class CIFAR-10)."""
@@ -70,54 +76,58 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         self.logger.info(f"Training batches: {len(self.train_loader)}")
     
     def adapt_to_binary_task(self):
-        """Adapt model to binary task using PEFT.
+        """Adapt model to binary task using PEFT on backbone.
         
-        This is the key method that implements proper adaptation:
-        1. Save base model state
-        2. Replace final layer with binary classifier
-        3. Apply PEFT method (LoRA/GFT) to final layer
-        4. Train on binary task
+        NEW APPROACH (C2-Modified):
+        1. Keep 10-class head TRAINABLE (not frozen)
+        2. Apply PEFT (LoRA/GFT) to backbone layers (layer3, layer4)
+        3. During training: aggregate 10-class logits → binary logits
+        4. During base eval: use all 10 logits directly
+        
+        This tests whether backbone features are preserved despite full model fine-tuning.
         """
         self.logger.info("=" * 50)
-        self.logger.info("STAGE 2: Adapting to binary task")
+        self.logger.info("STAGE 2: Adapting to binary task (Approach C2)")
         self.logger.info("=" * 50)
         
-        # Save base model state
+        # Save base model state for reference
         self.base_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
         
-        # Get adaptation task
+        # Get adaptation task and method
         adapt_task = self.config['data']['adapt_task']
         method = self.config['model']['method']
+        rank = self.config['model'].get('rank', 8)
         
         self.logger.info(f"Adaptation task: {adapt_task}")
         self.logger.info(f"PEFT method: {method}")
+        self.logger.info(f"Rank: {rank}")
         
-        # Replace final layer with binary classifier
-        in_features = self.model.fc.in_features
-        base_fc = nn.Linear(in_features, 2)  # Binary classification
+        # Get aggregation mapping for this task
+        self.aggregation_mapping = get_class_aggregation_mapping(adapt_task, num_base_classes=10)
+        self.logger.info(f"Class aggregation mapping: {self.aggregation_mapping}")
         
-        # Copy weights from original fc (first 2 classes)
-        with torch.no_grad():
-            base_fc.weight.data = self.model.fc.weight.data[:2].clone()
-            base_fc.bias.data = self.model.fc.bias.data[:2].clone()
-        
-        # Apply PEFT method
-        if method == 'lora':
-            rank = self.config['model'].get('rank', 8)
-            self.model.fc = LoRALinear(base_fc, rank=rank)
-            self.logger.info(f"Applied LoRA with rank={rank}")
-        
-        elif method == 'gft':
-            rank = self.config['model'].get('rank', 8)
-            self.model.fc = GeometricLinear(base_fc, rank=rank)
-            self.logger.info(f"Applied GFT with rank={rank}")
-        
+        # Apply PEFT to backbone layers (layer3 and layer4)
+        if method in ['lora', 'gft']:
+            self.logger.info("Applying PEFT to backbone layers (layer3, layer4)...")
+            
+            # Apply to layer3
+            self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
+            self.logger.info(f"  ✓ Applied {method.upper()} to layer3")
+            
+            # Apply to layer4
+            self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
+            self.logger.info(f"  ✓ Applied {method.upper()} to layer4")
+            
+            # FC head remains trainable (NOT frozen)
+            self.model.fc.weight.requires_grad = True
+            self.model.fc.bias.requires_grad = True
+            self.logger.info("  ✓ FC head is TRAINABLE (will co-adapt with backbone)")
+            
         elif method == 'full_ft':
-            self.model.fc = base_fc
-            # Unfreeze all parameters
+            # Full fine-tuning: everything is trainable
             for param in self.model.parameters():
                 param.requires_grad = True
-            self.logger.info("Using full fine-tuning")
+            self.logger.info("Using full fine-tuning (all parameters trainable)")
         
         else:
             raise ValueError(f"Unsupported method: {method}")
@@ -126,12 +136,13 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         self.model = self.model.to(self.device)
         
         # Setup new data loaders for binary task
+        # Note: We still use the original 10-class labels, but will aggregate during training
         self.train_loader, self.val_loader = create_data_loaders(
             dataset_name='cifar10',
             data_dir=self.config['paths']['data_dir'],
             batch_size=self.config['data']['batch_size'],
             num_workers=self.config['data']['num_workers'],
-            task_type=adapt_task
+            task_type=adapt_task  # This gives us binary labels
         )
         self.test_loader = self.val_loader
         
@@ -141,16 +152,26 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         # Reset training state
         self.current_epoch = 0
         self.best_val_acc = 0.0
+        
+        self.logger.info("Adaptation setup complete!")
+        self.logger.info(f"  - Backbone: {method.upper()} applied to layer3, layer4")
+        self.logger.info(f"  - FC head: Trainable (10 classes)")
+        self.logger.info(f"  - Training: Binary task via logit aggregation")
+        self.logger.info(f"  - Evaluation: Full 10-class for base task retention")
     
     def evaluate_base_task(self) -> float:
         """Evaluate on original CIFAR-10 (10-class) task.
+        
+        NEW APPROACH: No head swapping needed!
+        The model still has its 10-class head, so we just evaluate directly.
+        This tests if the adapted backbone can still produce good features for base task.
         
         Returns:
             Accuracy on base task
         """
         self.logger.info("Evaluating retention on base CIFAR-10 task...")
         
-        # Create base task data loader
+        # Create base task data loader (10-class labels)
         _, base_test_loader = create_data_loaders(
             dataset_name='cifar10',
             data_dir=self.config['paths']['data_dir'],
@@ -159,27 +180,9 @@ class ResNetCIFAR10Experiment(BaseExperiment):
             task_type=None  # Original 10-class
         )
         
-        # Temporarily replace fc with 10-class classifier
-        current_fc = self.model.fc
-        in_features = current_fc.base.in_features if hasattr(current_fc, 'base') else current_fc.in_features
-        
-        # Create 10-class fc and load base weights
-        temp_fc = nn.Linear(in_features, 10).to(self.device)
-        
-        # Load base model fc weights
-        if self.base_model_state is not None:
-            temp_fc.load_state_dict({
-                'weight': self.base_model_state['fc.weight'],
-                'bias': self.base_model_state['fc.bias']
-            })
-        
-        self.model.fc = temp_fc
-        
-        # Evaluate
+        # Evaluate directly - no head swapping needed!
+        # The model still has its 10-class fc head
         _, base_acc = self.evaluate(base_test_loader)
-        
-        # Restore adapted fc
-        self.model.fc = current_fc
         
         return base_acc
     
