@@ -10,7 +10,7 @@ from pathlib import Path
 from experiments.base_experiment import BaseExperiment
 from models import LoRALinear, GeometricLinear
 from utils.data_utils import create_data_loaders, get_num_classes
-from utils.metrics import compute_forgetting_metrics
+from utils.metrics import compute_forgetting_metrics, compute_accuracy
 from utils.peft_utils import (
     apply_peft_to_resnet_layer,
     get_class_aggregation_mapping,
@@ -106,22 +106,27 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         self.aggregation_mapping = get_class_aggregation_mapping(adapt_task, num_base_classes=10)
         self.logger.info(f"Class aggregation mapping: {self.aggregation_mapping}")
         
-        # Apply PEFT to backbone layers (layer3 and layer4)
+        # 1. Freeze entire model
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.logger.info("  ✓ Entire model frozen")
+            
+        # 2. Apply PEFT to backbone layers (layer3 and layer4)
         if method in ['lora', 'gft']:
-            self.logger.info("Applying PEFT to backbone layers (layer3, layer4)...")
+            self.logger.info(f"Applying {method.upper()} to backbone layers (layer3, layer4)...")
             
-            # Apply to layer3
+            # Apply to layer3 and layer4
             self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
-            self.logger.info(f"  ✓ Applied {method.upper()} to layer3")
-            
-            # Apply to layer4
             self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
-            self.logger.info(f"  ✓ Applied {method.upper()} to layer4")
             
-            # FC head remains trainable (NOT frozen)
+            # 3. Unfreeze FC head (for co-adaptation)
             self.model.fc.weight.requires_grad = True
             self.model.fc.bias.requires_grad = True
-            self.logger.info("  ✓ FC head is TRAINABLE (will co-adapt with backbone)")
+            self.logger.info("  ✓ FC head is TRAINABLE (for co-adaptation)")
+            
+            # Log number of trainable parameters
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.logger.info(f"  ✓ Trainable parameters in Stage 2: {trainable_params:,}")
             
         elif method == 'full_ft':
             # Full fine-tuning: everything is trainable
@@ -185,6 +190,80 @@ class ResNetCIFAR10Experiment(BaseExperiment):
         _, base_acc = self.evaluate(base_test_loader)
         
         return base_acc
+
+    def train_epoch(self, epoch: int) -> Tuple[float, float]:
+        """Train for one epoch with optional logit aggregation."""
+        if self.aggregation_mapping is None:
+            return super().train_epoch(epoch)
+            
+        self.model.train()
+        self.metrics_tracker.reset()
+        self.progress.start_epoch(epoch)
+        
+        for batch_idx, (inputs, targets) in enumerate(self.train_loader):
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)  # Base task logits [B, 10]
+            
+            # Aggregate to binary task logits [B, 2]
+            aggregated_outputs = aggregate_logits(outputs, self.aggregation_mapping)
+            loss = self.criterion(aggregated_outputs, targets)
+            
+            loss.backward()
+            self.optimizer.step()
+            
+            # Compute accuracy on aggregation
+            acc = compute_accuracy(aggregated_outputs, targets)
+            
+            self.metrics_tracker.update_train(loss.item(), acc)
+            
+            if batch_idx % self.config['logging']['log_interval'] == 0:
+                self.progress.update_batch(batch_idx, {'loss': loss.item(), 'acc': acc})
+                self.logger.log_metrics(
+                    {'loss': loss.item(), 'accuracy': acc, 'lr': self.optimizer.param_groups[0]['lr']},
+                    prefix='batch/'
+                )
+        
+        avg_loss, avg_acc = self.metrics_tracker.get_average_train()
+        self.progress.finish_epoch({'loss': avg_loss, 'acc': avg_acc})
+        return avg_loss, avg_acc
+
+    def evaluate(self, data_loader: torch.utils.data.DataLoader) -> Tuple[float, float]:
+        """Evaluate model with optional logit aggregation."""
+        if self.aggregation_mapping is None or data_loader == self.val_loader: # Use aggregation only for Stage 2 adaptation task
+             # Actually, we should check if we are in Stage 2 AND if the data_loader is for the adaptation task
+             # But a simpler way is to check if the targets in the data_loader are already binary or not.
+             # In our setup, self.val_loader in Stage 2 has binary targets.
+             pass
+        else:
+            return super().evaluate(data_loader)
+
+        self.model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for inputs, targets in data_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = self.model(inputs)
+                
+                # Check if we need aggregation
+                # Targets size is [B]. If targets max >= num_classes_in_outputs, we might have an issue.
+                # In Stage 2 training, targets are binary (0, 1). Outputs are 10-class.
+                if self.aggregation_mapping is not None and targets.max() < len(self.aggregation_mapping):
+                    outputs = aggregate_logits(outputs, self.aggregation_mapping)
+                
+                loss = self.criterion(outputs, targets)
+                total_loss += loss.item()
+                acc = compute_accuracy(outputs, targets)
+                correct += acc * targets.size(0) / 100.0
+                total += targets.size(0)
+        
+        avg_loss = total_loss / len(data_loader) if len(data_loader) > 0 else 0
+        avg_acc = 100.0 * correct / total if total > 0 else 0
+        return avg_loss, avg_acc
     
     def run(self):
         """Run two-stage experiment: base task → adaptation."""
@@ -327,33 +406,48 @@ class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
         self.logger.info(f"Data loaders created for CIFAR-100 (100 classes)")
     
     def adapt_to_binary_task(self):
-        """Adapt to 20 coarse classes."""
+        """Adapt to 20 coarse classes using backbone PEFT (Approach C2)."""
         self.logger.info("=" * 50)
-        self.logger.info("STAGE 2: Adapting to 20 coarse classes")
+        self.logger.info("STAGE 2: Adapting to 20 coarse classes (Approach C2)")
         self.logger.info("=" * 50)
         
         # Save base model state
         self.base_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
         
-        # Replace with 20-class classifier
-        in_features = self.model.fc.in_features
-        base_fc = nn.Linear(in_features, 20)
-        
+        # Get adaptation task and method
         method = self.config['model']['method']
+        rank = self.config['model'].get('rank', 16)
         
-        if method == 'lora':
-            rank = self.config['model'].get('rank', 16)
-            self.model.fc = LoRALinear(base_fc, rank=rank)
-            self.logger.info(f"Applied LoRA (rank={rank}) to coarse classifier")
-        elif method == 'gft':
-            rank = self.config['model'].get('rank', 16)
-            self.model.fc = GeometricLinear(base_fc, rank=rank)
-            self.logger.info(f"Applied GFT (rank={rank}) to coarse classifier")
+        self.logger.info(f"PEFT method: {method}")
+        self.logger.info(f"Rank: {rank}")
+        
+        # Get aggregation mapping for CIFAR-100 coarse task
+        self.aggregation_mapping = get_class_aggregation_mapping('coarse', num_base_classes=100)
+        
+        # 1. Freeze entire model
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.logger.info("  ✓ Entire model frozen")
+        
+        # 2. Apply PEFT to backbone layers
+        if method in ['lora', 'gft']:
+            self.logger.info(f"Applying {method.upper()} to backbone layers (layer3, layer4)...")
+            self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
+            self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
+            
+            # 3. FC head remains trainable
+            self.model.fc.weight.requires_grad = True
+            self.model.fc.bias.requires_grad = True
+            self.logger.info("  ✓ FC head (100 classes) is TRAINABLE")
+            
+            # Log number of trainable parameters
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.logger.info(f"  ✓ Trainable parameters in Stage 2: {trainable_params:,}")
+            
         elif method == 'full_ft':
-            self.model.fc = base_fc
             for param in self.model.parameters():
                 param.requires_grad = True
-            self.logger.info("Using full fine-tuning for coarse classifier")
+            self.logger.info("Using full fine-tuning")
         
         self.model = self.model.to(self.device)
         
@@ -443,26 +537,7 @@ class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
             task_type=None  # Original 100-class
         )
         
-        # Temporarily replace fc with 100-class classifier
-        current_fc = self.model.fc
-        in_features = current_fc.base.in_features if hasattr(current_fc, 'base') else current_fc.in_features
-        
-        # Create 100-class fc and load base weights
-        temp_fc = nn.Linear(in_features, 100).to(self.device)
-        
-        # Load base model fc weights
-        if self.base_model_state is not None:
-            temp_fc.load_state_dict({
-                'weight': self.base_model_state['fc.weight'],
-                'bias': self.base_model_state['fc.bias']
-            })
-        
-        self.model.fc = temp_fc
-        
-        # Evaluate
+        # Evaluate directly
         _, base_acc = self.evaluate(base_test_loader)
-        
-        # Restore adapted fc
-        self.model.fc = current_fc
         
         return base_acc
