@@ -4,7 +4,7 @@ experiment:
   name: "resnet18_full_ft_even_odd"
   phase: 1
   exp_id: "R1.7"
-  seeds: [42, 123, 456]
+  seeds: [42]
 
 model:
   architecture: "resnet18"

@@ -230,10 +230,23 @@ class ExperimentLogger:
     
     def save_metrics_history(self):
         """Save all metrics history to JSON file."""
+        # 1. Save historical metrics
         history_file = self.log_dir / f"{self.exp_id}_metrics.json"
         with open(history_file, 'w') as f:
             json.dump(self.metrics_history, f, indent=2)
-        self.info(f"Saved metrics history to {history_file}")
+            
+        # 2. Save experiment metadata/config for easier aggregation
+        config_file = self.log_dir / "config.json"
+        metadata = {
+            'exp_name': self.exp_name,
+            'exp_id': self.exp_id,
+            'timestamp': datetime.now().isoformat(),
+            'config': self.config
+        }
+        with open(config_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+            
+        self.info(f"Saved metrics history and metadata to {self.log_dir}")
     
     def finish(self):
         """Finish logging and cleanup."""

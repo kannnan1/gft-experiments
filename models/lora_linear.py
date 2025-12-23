@@ -20,6 +20,8 @@ class LoRALinear(nn.Module):
         self.base.bias.requires_grad = False
 
         d_out, d_in = base_layer.weight.shape
+        self.in_features = d_in
+        self.out_features = d_out
         self.A = nn.Parameter(torch.randn(rank, d_in) * 0.01)
         self.B = nn.Parameter(torch.zeros(d_out, rank))
         self.rank = rank
