@@ -1,557 +1,273 @@
-"""ResNet CIFAR-10 experiment implementation with proper two-stage training."""
+"""ResNet CIFAR experiment implementation with Geometric Analysis and Stage A/B/C Protocol."""
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from torchvision import models
 import shutil
 from pathlib import Path
 
 from experiments.base_experiment import BaseExperiment
-from models import LoRALinear, GeometricLinear
 from utils.data_utils import create_data_loaders, get_num_classes
-from utils.metrics import compute_forgetting_metrics, compute_accuracy
+from utils.metrics import (
+    compute_forgetting_metrics, 
+    compute_accuracy,
+    compute_subspace_angle_drift,
+    compute_pairwise_distance_distortion,
+    compute_class_centroid_drift,
+    compute_cka_similarity
+)
 from utils.peft_utils import (
     apply_peft_to_resnet_layer,
-    get_class_aggregation_mapping,
-    aggregate_logits
+    FeatureExtractor
+)
+from utils.geo_plots import (
+    plot_pca_manifold_comparison,
+    plot_geometric_metrics_summary
 )
 
 
-class ResNetCIFAR10Experiment(BaseExperiment):
-    """ResNet experiment on CIFAR-10 with proper two-stage adaptation.
+class ResNetCIFARExperiment(BaseExperiment):
+    """ResNet experiment with Stage A/B/C Protocol and Geometric Manifold Analysis.
     
-    Stage 1: Train on base task (CIFAR-10 10-class)
-    Stage 2: Adapt final layer with PEFT to binary task
-    
-    This properly measures catastrophic forgetting.
+    Stage A: Base Training (Full Model on Dataset A)
+    Stage B: Adaptation (Backbone PEFT + FC Swap on Dataset B)
+    Stage C: Forgetting Evaluation (FC Restore + Geometric metrics on Dataset A)
     """
     
     def __init__(self, config: Dict[str, Any], seed: int = 42):
-        """Initialize ResNet CIFAR-10 experiment.
-        
-        Args:
-            config: Experiment configuration
-            seed: Random seed
-        """
         super().__init__(config, seed)
-        
-        # Store base task accuracy for forgetting computation
         self.base_task_acc = None
-        self.base_model_state = None
-        self.aggregation_mapping = None  # For aggregating base class logits to adapted task
-    
+        self.base_fc_state = None      # Stores the original FC weights/bias
+        self.base_features = {}        # Stores layer3/layer4 features from Stage A
+        self.base_targets = None       # Stores targets for manifold plotting
+        self.dataset_name = config['data']['base_task']
+        self.num_base_classes = 10 if self.dataset_name == 'cifar10' else 100
+
     def setup_model(self):
-        """Setup ResNet model for base task (10-class CIFAR-10)."""
-        # Create base model for 10-class CIFAR-10
-        if self.config['model']['architecture'] == 'resnet18':
+        """Stage A: Setup base model."""
+        arch = self.config['model']['architecture']
+        if arch == 'resnet18':
             self.model = models.resnet18(pretrained=self.config['model']['pretrained'])
-            self.model.fc = nn.Linear(self.model.fc.in_features, 10)
-        elif self.config['model']['architecture'] == 'resnet50':
+            self.model.fc = nn.Linear(self.model.fc.in_features, self.num_base_classes)
+        elif arch == 'resnet50':
             self.model = models.resnet50(pretrained=self.config['model']['pretrained'])
-            self.model.fc = nn.Linear(self.model.fc.in_features, 10)
+            self.model.fc = nn.Linear(self.model.fc.in_features, self.num_base_classes)
         else:
-            raise ValueError(f"Unsupported architecture: {self.config['model']['architecture']}")
-        
-        # Move to device
+            raise ValueError(f"Unsupported architecture: {arch}")
+            
         self.model = self.model.to(self.device)
-        
-        self.logger.info(f"Model setup complete: {self.config['model']['architecture']}")
-        self.logger.info("Stage 1: Training on base CIFAR-10 (10 classes)")
-    
-    def setup_data(self):
-        """Setup CIFAR-10 data loaders for base task."""
-        # Base task: 10-class CIFAR-10
+        self.logger.info(f"Model {arch} initialized for {self.num_base_classes} base classes.")
+
+    def setup_data(self, task_type: Optional[str] = None):
+        """Setup data loaders for either Base (None) or Adapted (task_type) tasks."""
         self.train_loader, self.val_loader = create_data_loaders(
-            dataset_name='cifar10',
+            dataset_name=self.dataset_name,
             data_dir=self.config['paths']['data_dir'],
             batch_size=self.config['data']['batch_size'],
             num_workers=self.config['data']['num_workers'],
-            task_type=None  # Original 10-class task
+            task_type=task_type
         )
-        
         self.test_loader = self.val_loader
+        self.logger.info(f"Data setup: {self.dataset_name} Task={task_type}")
+
+    def capture_features(self, n_batches: int = 5) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Extract layer3 and layer4 features for geometric analysis."""
+        self.model.eval()
+        extractor = FeatureExtractor(self.model, layers=['layer3', 'layer4'], pool=True)
         
-        self.logger.info(f"Data loaders created for CIFAR-10 (10 classes)")
-        self.logger.info(f"Training batches: {len(self.train_loader)}")
-    
-    def adapt_to_binary_task(self):
-        """Adapt model to binary task using PEFT on backbone.
+        all_features = {'layer3': [], 'layer4': []}
+        all_targets = []
         
-        NEW APPROACH (C2-Modified):
-        1. Keep 10-class head TRAINABLE (not frozen)
-        2. Apply PEFT (LoRA/GFT) to backbone layers (layer3, layer4)
-        3. During training: aggregate 10-class logits → binary logits
-        4. During base eval: use all 10 logits directly
+        with torch.no_grad():
+            for i, (inputs, targets) in enumerate(self.test_loader):
+                if i >= n_batches: break
+                inputs = inputs.to(self.device)
+                features = extractor(inputs)
+                
+                for k in all_features:
+                    all_features[k].append(features[k].cpu())
+                all_targets.append(targets)
         
-        This tests whether backbone features are preserved despite full model fine-tuning.
-        """
-        self.logger.info("=" * 50)
-        self.logger.info("STAGE 2: Adapting to binary task (Approach C2)")
-        self.logger.info("=" * 50)
+        extractor.remove_hooks()
         
-        # Save base model state for reference
-        self.base_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        # Concatenate
+        for k in all_features:
+            all_features[k] = torch.cat(all_features[k], dim=0)
         
-        # Get adaptation task and method
+        return all_features, torch.cat(all_targets, dim=0)
+
+    def adapt_to_task(self):
+        """Stage B: Adaptation via Backbone PEFT and FC Swap."""
+        self.logger.info("="*50)
+        self.logger.info("STAGE B: Adaptation")
+        self.logger.info("="*50)
+        
+        # 1. Capture base features before any backbone warping
+        self.logger.info("Capturing base semantic manifold features...")
+        self.base_features, self.base_targets = self.capture_features()
+        
+        # 2. Save base FC head state for Stage C
+        self.base_fc_state = {k: v.clone() for k, v in self.model.fc.state_dict().items()}
+        
+        # 3. Swap FC head for target task
         adapt_task = self.config['data']['adapt_task']
+        num_new_classes = 2 # Default for binary
+        if self.dataset_name == 'cifar100' and adapt_task == 'coarse':
+            num_new_classes = 20
+            
+        in_features = self.model.fc.in_features
+        self.model.fc = nn.Linear(in_features, num_new_classes).to(self.device)
+        self.logger.info(f"Swapped FC head: {self.num_base_classes} -> {num_new_classes} classes.")
+        
+        # 4. Apply PEFT to layer3 and layer4
         method = self.config['model']['method']
         rank = self.config['model'].get('rank', 8)
         
-        self.logger.info(f"Adaptation task: {adapt_task}")
-        self.logger.info(f"PEFT method: {method}")
-        self.logger.info(f"Rank: {rank}")
-        
-        # Get aggregation mapping for this task
-        self.aggregation_mapping = get_class_aggregation_mapping(adapt_task, num_base_classes=10)
-        self.logger.info(f"Class aggregation mapping: {self.aggregation_mapping}")
-        
-        # 1. Freeze entire model
+        # Freeze entire model first
         for param in self.model.parameters():
             param.requires_grad = False
-        self.logger.info("  ✓ Entire model frozen")
             
-        # 2. Apply PEFT to backbone layers (layer3 and layer4)
         if method in ['lora', 'gft']:
-            self.logger.info(f"Applying {method.upper()} to backbone layers (layer3, layer4)...")
-            
-            # Apply to layer3 and layer4
+            self.logger.info(f"Applying {method.upper()} to layer3 and layer4 (rank={rank})")
             self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
             self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
             
-            # 3. FC head remains FROZEN
-            # This is critical: if the head is trainable, the model will just 
-            # adjust the head weights/biases and never "pressure" the backbone 
-            # to adapt, leading to artificially low forgetting.
-            self.model.fc.weight.requires_grad = False
-            self.model.fc.bias.requires_grad = False
-            self.logger.info("  ✓ FC head (10 classes) is FROZEN (forcing backbone to adapt)")
-            
-            # Log number of trainable parameters
-            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-            self.logger.info(f"  ✓ Trainable parameters in Stage 2 (PEFT only): {trainable_params:,}")
-            
+            # Ensure the newly added PEFT parameters have requires_grad=True
+            # (They should by default, but this is for safety)
+            for name, param in self.model.named_parameters():
+                if any(x in name for x in ['.A', '.B', '.U', '.V']):
+                    param.requires_grad = True
+                    
         elif method == 'full_ft':
-            # Full fine-tuning: everything is trainable
+            self.logger.info("Allowing full backbone fine-tuning.")
             for param in self.model.parameters():
                 param.requires_grad = True
-            self.logger.info("Using full fine-tuning (all parameters trainable)")
         
-        else:
-            raise ValueError(f"Unsupported method: {method}")
-        
-        # Move to device
+        # New FC must be trainable
+        for param in self.model.fc.parameters():
+            param.requires_grad = True
+            
+        # Log which parameters are actually being trained
+        self.logger.info("--- Trainable Parameters for Stage B ---")
+        trainable_count = 0
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.logger.info(f"  [TRAINABLE] {name}: {param.numel():,}")
+                trainable_count += param.numel()
+        self.logger.info(f"Total trainable parameters: {trainable_count:,}")
+        self.logger.info("-" * 40)
+            
         self.model = self.model.to(self.device)
-        
-        # Setup new data loaders for binary task
-        # Note: We still use the original 10-class labels, but will aggregate during training
-        self.train_loader, self.val_loader = create_data_loaders(
-            dataset_name='cifar10',
-            data_dir=self.config['paths']['data_dir'],
-            batch_size=self.config['data']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            task_type=adapt_task  # This gives us binary labels
-        )
-        self.test_loader = self.val_loader
-        
-        # Reset optimizer for adaptation
         self.setup_optimizer()
         
-        # Reset training state
+        # 5. Load Adaptation Data
+        self.setup_data(task_type=adapt_task)
         self.current_epoch = 0
         self.best_val_acc = 0.0
-        
-        self.logger.info("Adaptation setup complete!")
-        self.logger.info(f"  - Backbone: {method.upper()} applied to layer3, layer4")
-        self.logger.info("  - FC head: FROZEN (10 classes)")
-        self.logger.info("  - Training: Binary task via Collision Mapping (slicing outputs to :2)")
-        self.logger.info("  - Evaluation: Full 10-class for base task retention")
-    
-    def evaluate_base_task(self) -> float:
-        """Evaluate on original CIFAR-10 (10-class) task.
-        
-        COLISSION MAPPING EVALUATION:
-        We use the full original 10-class head. This tests whether 
-        features for all classes (even those not used in Stage 2) 
-        have been warped/smashed by the adaptation.
-        
-        Returns:
-            Accuracy on base task
-        """
-        self.logger.info("Evaluating retention on base CIFAR-10 task...")
-        
-        # Create base task data loader (10-class labels)
-        _, base_test_loader = create_data_loaders(
-            dataset_name='cifar10',
-            data_dir=self.config['paths']['data_dir'],
-            batch_size=self.config['data']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            task_type=None  # Original 10-class
-        )
-        
-        # Temporarily clear aggregation mapping to use standard evaluate (full 10-class)
-        orig_mapping = self.aggregation_mapping
-        self.aggregation_mapping = None
-        
-        _, base_acc = self.evaluate(base_test_loader)
-        
-        # Restore mapping
-        self.aggregation_mapping = orig_mapping
-        
-        return base_acc
 
-    def train_epoch(self, epoch: int) -> Tuple[float, float]:
-        """Train for one epoch with Collision Mapping."""
-        # Stage 1 or Full FT doesn't use aggregation mapping
-        if self.aggregation_mapping is None:
-            return super().train_epoch(epoch)
-            
-        self.model.train()
-        self.metrics_tracker.reset()
-        self.progress.start_epoch(epoch)
-        
-        # Determine number of classes for Collision Mapping
-        num_adapted_classes = len(self.aggregation_mapping)
-        
-        for batch_idx, (inputs, targets) in enumerate(self.train_loader):
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
-            
-            self.optimizer.zero_grad()
-            outputs = self.model(inputs)  # Base task logits [B, 10]
-            
-            # COLLISION MAPPING: 
-            # Slice the base output to force new features into old neurons.
-            # This creates the "Adaptation Pressure" (The POC approach).
-            collision_outputs = outputs[:, :num_adapted_classes]
-            
-            loss = self.criterion(collision_outputs, targets)
-            loss.backward()
-            self.optimizer.step()
-            
-            # Compute accuracy on adaptation task
-            acc = compute_accuracy(collision_outputs, targets)
-            
-            self.metrics_tracker.update_train(loss.item(), acc)
-            
-            if batch_idx % self.config['logging']['log_interval'] == 0:
-                self.progress.update_batch(batch_idx, {'loss': loss.item(), 'acc': acc})
-                self.logger.log_metrics(
-                    {'loss': loss.item(), 'accuracy': acc, 'lr': self.optimizer.param_groups[0]['lr']},
-                    prefix='batch/'
-                )
-        
-        avg_loss, avg_acc = self.metrics_tracker.get_average_train()
-        self.progress.finish_epoch({'loss': avg_loss, 'acc': avg_acc})
-        return avg_loss, avg_acc
-
-    def evaluate(self, data_loader: torch.utils.data.DataLoader) -> Tuple[float, float]:
-        """Evaluate model with optional Collision Mapping."""
-        # If no mapping (Stage 1 or Base Review), use standard evaluation
-        if self.aggregation_mapping is None:
-            return super().evaluate(data_loader)
-
-        self.model.eval()
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        
-        # Determine number of classes for Collision Mapping
-        num_adapted_classes = len(self.aggregation_mapping)
-        
-        with torch.no_grad():
-            for inputs, targets in data_loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self.model(inputs)
-                
-                # Check if we are evaluating the ADAPTATION task (targets are 0, 1 etc)
-                # If targets max is low (within num_adapted_classes), we use the Collision Neurons.
-                # If we are evaluating the BASE task, this loop is not called (self.aggregation_mapping is None)
-                if targets.max() < num_adapted_classes:
-                    outputs = outputs[:, :num_adapted_classes]
-                
-                loss = self.criterion(outputs, targets)
-                total_loss += loss.item()
-                acc = compute_accuracy(outputs, targets)
-                correct += acc * targets.size(0) / 100.0
-                total += targets.size(0)
-        
-        avg_loss = total_loss / len(data_loader) if len(data_loader) > 0 else 0
-        avg_acc = 100.0 * correct / total if total > 0 else 0
-        return avg_loss, avg_acc
-    
     def run(self):
-        """Run two-stage experiment: base task → adaptation."""
-        # Check if we should skip stage 1
+        """Execute Stage A/B/C Protocol."""
+        # --- Stage A: Base Training ---
         skip_stage1 = self.config['training'].get('skip_stage1', False)
+        self.setup_data(task_type=None) # Base task
         
         if skip_stage1:
-            self.logger.info("=" * 50)
-            self.logger.info("SKIPPING STAGE 1: Using pre-trained base model")
-            self.logger.info("=" * 50)
-            
-            # Load pre-trained model if path provided
             checkpoint_path = self.config['training'].get('stage1_checkpoint')
-            if checkpoint_path and Path(checkpoint_path).exists():
-                self.logger.info(f"Loading base model from {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    self.model.load_state_dict(checkpoint['model_state_dict'])
-                else:
-                    self.model.load_state_dict(checkpoint)
-            else:
-                if checkpoint_path:
-                    self.logger.error(f"Checkpoint path {checkpoint_path} not found!")
-                self.logger.warning("Using current model state for adaptation.")
-            
-            # Setup data for evaluation of base task
-            self.setup_data()
-            
-            # Evaluate base task to get accuracy
-            _, self.base_task_acc = self.evaluate(self.test_loader)
-            self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
+            self.logger.info(f"Loading Stage A checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
         else:
-            # Stage 1: Train on base task
-            self.logger.info("=" * 50)
-            self.logger.info("STAGE 1: Training on base CIFAR-10 (10 classes)")
-            self.logger.info("=" * 50)
-            
+            self.logger.info("STAGE A: Training on base task")
             super().run(finish=False)
+            # Save Stage A result
+            stage1_path = Path(self.checkpoint_manager.get_best_checkpoint_path()).parent / "stage1_best.pt"
+            shutil.copy(self.checkpoint_manager.get_best_checkpoint_path(), stage1_path)
             
-            # Save base task accuracy
-            _, self.base_task_acc = self.evaluate(self.test_loader)
-            self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
-            
-            # Save Stage 1 model explicitly
-            best_path = self.checkpoint_manager.get_best_checkpoint_path()
-            if best_path:
-                stage1_path = Path(best_path).parent / "stage1_best.pt"
-                shutil.copy(best_path, stage1_path)
-                self.logger.info(f"Saved Stage 1 best model to {stage1_path}")
+        _, self.base_task_acc = self.evaluate(self.test_loader)
+        self.logger.info(f"Base Task A Accuracy: {self.base_task_acc:.2f}%")
         
-        # Stage 2: Adapt to binary task
-        self.adapt_to_binary_task()
-        
-        # Train on adaptation task
+        # --- Stage B: Adaptation ---
+        self.adapt_to_task()
         super().run(finish=True)
         
-        # Save Stage 2 model explicitly
+        # Save Stage B result
         best_path = self.checkpoint_manager.get_best_checkpoint_path()
         if best_path:
             stage2_path = Path(best_path).parent / "stage2_best.pt"
             shutil.copy(best_path, stage2_path)
-            self.logger.info(f"Saved Stage 2 best model to {stage2_path}")
-    
+            
+        # --- Stage C: Forgetting Evaluation ---
+        self.final_evaluation()
+
     def final_evaluation(self):
-        """Final evaluation with catastrophic forgetting metrics."""
-        self.logger.info("=" * 50)
-        self.logger.info("FINAL EVALUATION")
-        self.logger.info("=" * 50)
+        """Stage C: Restore FC10 and perform Geometric Analysis."""
+        self.logger.info("="*50)
+        self.logger.info("STAGE C: Forgetting Evaluation & Geometric Analysis")
+        self.logger.info("="*50)
         
-        # Evaluate on adaptation task
-        adapt_loss, adapt_acc = self.evaluate(self.test_loader)
-        self.logger.info(f"Adaptation task accuracy: {adapt_acc:.2f}%")
+        # 1. Evaluate on Task B (Adaptation)
+        self.setup_data(task_type=self.config['data']['adapt_task'])
+        _, adapt_acc = self.evaluate(self.test_loader)
         
-        # Evaluate retention on base task
-        retention_acc = self.evaluate_base_task()
+        # 2. Extract Adapted Features
+        adapted_features, _ = self.capture_features()
         
-        # Compute forgetting metrics
-        if self.base_task_acc is not None:
-            forgetting_metrics = compute_forgetting_metrics(
-                base_acc=self.base_task_acc,
-                retention_acc=retention_acc
+        # 3. Restore FC10 and evaluate Task A (Base)
+        in_features = self.model.fc.in_features
+        self.model.fc = nn.Linear(in_features, self.num_base_classes).to(self.device)
+        self.model.fc.load_state_dict(self.base_fc_state)
+        
+        self.setup_data(task_type=None)
+        _, retention_acc = self.evaluate(self.test_loader)
+        
+        # 4. Compute Accuracy Metrics
+        forgetting = compute_forgetting_metrics(self.base_task_acc, retention_acc)
+        self.logger.info(f"Base: {self.base_task_acc:.2f}%, Retention: {retention_acc:.2f}%")
+        self.logger.info(f"Forgetting %: {forgetting['forgetting_percent']:.2f}%")
+        
+        # 5. PERFORM GEOMETRIC ANALYSIS
+        self.logger.info("Computing geometric distortion metrics...")
+        plots_dir = Path(self.config['paths']['log_dir']) / self.config['experiment']['exp_id'] / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        
+        geo_results = {}
+        for layer in ['layer3', 'layer4']:
+            F_b = self.base_features[layer]
+            F_a = adapted_features[layer]
+            
+            # Distance Distortion (Frobenius)
+            dist_warp = compute_pairwise_distance_distortion(F_b, F_a)
+            # Subspace Drift (PCA Principal Angles)
+            drift_deg = compute_subspace_angle_drift(F_b, F_a, k=50)
+            # Class Centroid Drift
+            center_drift = compute_class_centroid_drift(F_b, F_a, self.base_targets)
+            # CKA Similarity
+            cka = compute_cka_similarity(F_b, F_a)
+            
+            geo_results[f"{layer}/Distance distortion"] = dist_warp
+            geo_results[f"{layer}/Average subspace drift (deg)"] = drift_deg
+            geo_results[f"{layer}/Centroid drift"] = center_drift
+            geo_results[f"{layer}/CKA Similarity"] = cka
+            
+            # Plot PCA Comparison
+            plot_pca_manifold_comparison(
+                F_b, F_a, self.base_targets, layer, plots_dir, 
+                self.config['experiment']['exp_id']
             )
             
-            self.logger.info("=" * 50)
-            self.logger.info("CATASTROPHIC FORGETTING ANALYSIS")
-            self.logger.info("=" * 50)
-            self.logger.info(f"Base task accuracy (before adaptation): {self.base_task_acc:.2f}%")
-            self.logger.info(f"Adaptation task accuracy: {adapt_acc:.2f}%")
-            self.logger.info(f"Base task accuracy (after adaptation): {retention_acc:.2f}%")
-            self.logger.info(f"Forgetting percentage: {forgetting_metrics['forgetting_percent']:.2f}%")
-            self.logger.info(f"Absolute accuracy drop: {forgetting_metrics['absolute_drop']:.2f}%")
-            self.logger.info(f"Retention rate: {forgetting_metrics['retention_rate']:.2f}%")
-            self.logger.info("=" * 50)
-            
-            # Log to wandb
-            self.logger.log_forgetting_metrics(
-                base_acc=self.base_task_acc,
-                adapt_acc=adapt_acc,
-                retention_acc=retention_acc
-            )
-        else:
-            self.logger.warning("Base task accuracy is None. Skipping forgetting analysis.")
+        # Log to wandb and console
+        self.logger.log_metrics(geo_results, prefix="geometric/")
+        plot_geometric_metrics_summary(geo_results, plots_dir, self.config['experiment']['exp_id'])
         
-        # Log final metrics
-        self.logger.log_metrics({
-            'final/adaptation_accuracy': adapt_acc,
-            'final/adaptation_loss': adapt_loss
-        })
+        self.logger.log_forgetting_metrics(self.base_task_acc, adapt_acc, retention_acc)
+        self.logger.info("Geometric analysis complete. Plots saved to subdirectory.")
 
 
-class ResNetCIFAR100Experiment(ResNetCIFAR10Experiment):
-    """ResNet experiment on CIFAR-100 with coarse label adaptation."""
-    
-    def setup_model(self):
-        """Setup ResNet model for CIFAR-100 (100 classes)."""
-        if self.config['model']['architecture'] == 'resnet18':
-            self.model = models.resnet18(pretrained=self.config['model']['pretrained'])
-            self.model.fc = nn.Linear(self.model.fc.in_features, 100)
-        elif self.config['model']['architecture'] == 'resnet50':
-            self.model = models.resnet50(pretrained=self.config['model']['pretrained'])
-            self.model.fc = nn.Linear(self.model.fc.in_features, 100)
-        else:
-            raise ValueError(f"Unsupported architecture: {self.config['model']['architecture']}")
-        
-        self.model = self.model.to(self.device)
-        self.logger.info(f"Model setup complete: {self.config['model']['architecture']}")
-        self.logger.info("Stage 1: Training on CIFAR-100 (100 fine classes)")
-    
-    def setup_data(self):
-        """Setup CIFAR-100 data loaders for base task."""
-        self.train_loader, self.val_loader = create_data_loaders(
-            dataset_name='cifar100',
-            data_dir=self.config['paths']['data_dir'],
-            batch_size=self.config['data']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            task_type=None  # Original 100-class task
-        )
-        
-        self.test_loader = self.val_loader
-        self.logger.info(f"Data loaders created for CIFAR-100 (100 classes)")
-    
-    def adapt_to_binary_task(self):
-        """Adapt to 20 coarse classes using backbone PEFT (Approach C2)."""
-        self.logger.info("=" * 50)
-        self.logger.info("STAGE 2: Adapting to 20 coarse classes (Approach C2)")
-        self.logger.info("=" * 50)
-        
-        # Save base model state
-        self.base_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-        
-        # Get adaptation task and method
-        method = self.config['model']['method']
-        rank = self.config['model'].get('rank', 16)
-        
-        self.logger.info(f"PEFT method: {method}")
-        self.logger.info(f"Rank: {rank}")
-        
-        # Get aggregation mapping for CIFAR-100 coarse task
-        self.aggregation_mapping = get_class_aggregation_mapping('coarse', num_base_classes=100)
-        
-        # 1. Freeze entire model
-        for param in self.model.parameters():
-            param.requires_grad = False
-        self.logger.info("  ✓ Entire model frozen")
-        
-        # 2. Apply PEFT to backbone layers
-        if method in ['lora', 'gft']:
-            self.logger.info(f"Applying {method.upper()} to backbone layers (layer3, layer4)...")
-            self.model.layer3 = apply_peft_to_resnet_layer(self.model.layer3, method, rank)
-            self.model.layer4 = apply_peft_to_resnet_layer(self.model.layer4, method, rank)
-            
-            # 3. FC head remains FROZEN
-            self.model.fc.weight.requires_grad = False
-            self.model.fc.bias.requires_grad = False
-            self.logger.info("  ✓ FC head (100 classes) is FROZEN")
-            
-            # Log number of trainable parameters
-            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-            self.logger.info(f"  ✓ Trainable parameters in Stage 2 (PEFT only): {trainable_params:,}")
-            
-        elif method == 'full_ft':
-            for param in self.model.parameters():
-                param.requires_grad = True
-            self.logger.info("Using full fine-tuning")
-        
-        self.model = self.model.to(self.device)
-        
-        # Setup coarse label data loaders
-        self.train_loader, self.val_loader = create_data_loaders(
-            dataset_name='cifar100',
-            data_dir=self.config['paths']['data_dir'],
-            batch_size=self.config['data']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            task_type='coarse'
-        )
-        self.test_loader = self.val_loader
-        
-        # Reset optimizer
-        self.setup_optimizer()
-        self.current_epoch = 0
-        self.best_val_acc = 0.0
+class ResNetCIFAR10Experiment(ResNetCIFARExperiment):
+    """Legacy wrapper for CIFAR-10."""
+    pass
 
-    def run(self):
-        """Run two-stage experiment: CIFAR-100 base task → coarse adaptation."""
-        # Check if we should skip stage 1
-        skip_stage1 = self.config['training'].get('skip_stage1', False)
-        
-        if skip_stage1:
-            self.logger.info("=" * 50)
-            self.logger.info("SKIPPING STAGE 1: Using pre-trained base model")
-            self.logger.info("=" * 50)
-            
-            checkpoint_path = self.config['training'].get('stage1_checkpoint')
-            if checkpoint_path and Path(checkpoint_path).exists():
-                self.logger.info(f"Loading base model from {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    self.model.load_state_dict(checkpoint['model_state_dict'])
-                else:
-                    self.model.load_state_dict(checkpoint)
-            
-            # Setup data for evaluation
-            self.setup_data()
-            
-            _, self.base_task_acc = self.evaluate(self.test_loader)
-            self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
-        else:
-            # Stage 1: Train on base task
-            self.logger.info("=" * 50)
-            self.logger.info("STAGE 1: Training on base CIFAR-100 (100 classes)")
-            self.logger.info("=" * 50)
-            
-            # Call BaseExperiment.run()
-            super(ResNetCIFAR10Experiment, self).run(finish=False)
-            
-            # Save base task accuracy
-            _, self.base_task_acc = self.evaluate(self.test_loader)
-            self.logger.info(f"Base task accuracy: {self.base_task_acc:.2f}%")
-            
-            # Save Stage 1 model explicitly
-            best_path = self.checkpoint_manager.get_best_checkpoint_path()
-            if best_path:
-                stage1_path = Path(best_path).parent / "stage1_best.pt"
-                shutil.copy(best_path, stage1_path)
-                self.logger.info(f"Saved Stage 1 best model to {stage1_path}")
-        
-        # Stage 2: Adapt to coarse task
-        self.adapt_to_binary_task()
-        
-        # Train on adaptation task
-        # Call BaseExperiment.run() again
-        super(ResNetCIFAR10Experiment, self).run(finish=True)
-        
-        # Save Stage 2 model explicitly
-        best_path = self.checkpoint_manager.get_best_checkpoint_path()
-        if best_path:
-            stage2_path = Path(best_path).parent / "stage2_best.pt"
-            shutil.copy(best_path, stage2_path)
-            self.logger.info(f"Saved Stage 2 best model to {stage2_path}")
-
-    def evaluate_base_task(self) -> float:
-        """Evaluate on original CIFAR-100 (100-class) task."""
-        self.logger.info("Evaluating retention on base CIFAR-100 task...")
-        
-        # Create base task data loader
-        _, base_test_loader = create_data_loaders(
-            dataset_name='cifar100',
-            data_dir=self.config['paths']['data_dir'],
-            batch_size=self.config['data']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            task_type=None  # Original 100-class
-        )
-        
-        # Evaluate directly
-        _, base_acc = self.evaluate(base_test_loader)
-        
-        return base_acc
+class ResNetCIFAR100Experiment(ResNetCIFARExperiment):
+    """Legacy wrapper for CIFAR-100."""
+    pass

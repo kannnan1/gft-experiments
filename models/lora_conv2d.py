@@ -16,49 +16,58 @@ class LoRAConv2d(nn.Module):
     def __init__(self, base_layer: nn.Conv2d, rank: int = 8):
         super().__init__()
         self.base = base_layer
+        self.rank = rank
+
         # Freeze base layer
-        self.base.weight.requires_grad = False
-        if self.base.bias is not None:
-            self.base.bias.requires_grad = False
-        
-        # Get dimensions
+        for p in self.base.parameters():
+            p.requires_grad = False
+
+        # Dimensions
         out_channels = base_layer.out_channels
         in_channels = base_layer.in_channels
-        kernel_size = base_layer.kernel_size
-        
-        # LoRA parameters: A and B matrices
-        # A: (rank, in_channels * kernel_h * kernel_w)
-        # B: (out_channels, rank)
-        self.rank = rank
-        kernel_numel = in_channels * kernel_size[0] * kernel_size[1]
-        
+        kh, kw = base_layer.kernel_size
+        kernel_numel = in_channels * kh * kw
+
+        # LoRA params
         self.A = nn.Parameter(torch.randn(rank, kernel_numel) * 0.01)
         self.B = nn.Parameter(torch.zeros(out_channels, rank))
-        
-        # Store conv params
-        self.stride = base_layer.stride
-        self.padding = base_layer.padding
-        self.dilation = base_layer.dilation
-        self.groups = base_layer.groups
-        
-    def forward(self, x):
-        """Forward pass with LoRA adaptation."""
-        # Compute LoRA delta: B @ A
+
+        # Cached delta weight
+        self.register_buffer("_delta_weight", None)
+        self._dirty = True  # marks when A or B changes
+
+        # Hook to mark cache dirty after backward
+        self.A.register_hook(self._mark_dirty)
+        self.B.register_hook(self._mark_dirty)
+
+    def _mark_dirty(self, grad):
+        self._dirty = True
+        return grad
+
+    def _compute_delta_weight(self):
         delta = self.B @ self.A  # (out_channels, kernel_numel)
-        
-        # Reshape to conv weight shape
         delta = delta.view(
             self.base.out_channels,
             self.base.in_channels,
-            self.base.kernel_size[0],
-            self.base.kernel_size[1]
+            *self.base.kernel_size
         )
-        
-        # Apply convolution with adapted weights
-        adapted_weight = self.base.weight + delta
+        self._delta_weight = delta
+        self._dirty = False
+
+    def forward(self, x):
+        if self._dirty or self._delta_weight is None:
+            self._compute_delta_weight()
+
+        weight = self.base.weight + self._delta_weight
+
         return F.conv2d(
-            x, adapted_weight, self.base.bias,
-            self.stride, self.padding, self.dilation, self.groups
+            x,
+            weight,
+            self.base.bias,
+            stride=self.base.stride,
+            padding=self.base.padding,
+            dilation=self.base.dilation,
+            groups=self.base.groups,
         )
     
     def get_trainable_params(self):

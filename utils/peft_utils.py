@@ -199,3 +199,56 @@ def aggregate_logits(logits: torch.Tensor, aggregation_mapping: Dict[int, List[i
         aggregated[:, adapted_class] = torch.logsumexp(logits[:, base_classes], dim=1)
     
     return aggregated
+
+
+class FeatureExtractor(nn.Module):
+    """Utility class to extract features from specific layers using hooks.
+    
+    Args:
+        model: PyTorch model
+        layers: List of layer names to extract from (e.g., ['layer3', 'layer4'])
+        pool: Whether to apply global average pooling to the extracted features
+    """
+    
+    def __init__(self, model: nn.Module, layers: List[str], pool: bool = True):
+        super().__init__()
+        self.model = model
+        self.layers = layers
+        self.pool = pool
+        self.features = {layer: None for layer in layers}
+        self.hooks = []
+        
+        self._setup_hooks()
+        
+    def _setup_hooks(self):
+        """Setup forward hooks."""
+        for layer_name in self.layers:
+            # Find the layer
+            parts = layer_name.split('.')
+            module = self.model
+            for part in parts:
+                module = getattr(module, part)
+                
+            # Define the hook
+            def hook_fn(m, i, o, name=layer_name):
+                if self.pool and len(o.shape) == 4:
+                    # Global average pooling: [B, C, H, W] -> [B, C]
+                    self.features[name] = torch.mean(o, dim=(2, 3))
+                else:
+                    self.features[name] = o
+            
+            self.hooks.append(module.register_forward_hook(hook_fn))
+            
+    def remove_hooks(self):
+        """Remove all registered hooks."""
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
+            
+    def forward(self, x) -> Dict[str, torch.Tensor]:
+        """Forward pass and return collected features."""
+        # Reset features
+        self.features = {layer: None for layer in self.layers}
+        # Run model
+        self.model(x)
+        return self.features

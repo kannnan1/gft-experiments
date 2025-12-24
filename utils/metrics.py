@@ -204,6 +204,107 @@ def compute_cka_similarity(
     return cka.item()
 
 
+def compute_subspace_angle_drift(
+    F_base: torch.Tensor,
+    F_adapted: torch.Tensor,
+    k: int = 50
+) -> float:
+    """Compute principal angles between PCA subspaces of features.
+    
+    Measures how much the manifold's orientation has changed.
+    
+    Args:
+        F_base: Base features [batch, dim]
+        F_adapted: Adapted features [batch, dim]
+        k: Number of principal components to consider
+        
+    Returns:
+        Average principal angle in degrees
+    """
+    # Ensure k is not larger than dimensions
+    k = min(k, F_base.shape[0], F_base.shape[1])
+    
+    def get_principal_subspace(F, k):
+        # Center the data
+        F_centered = F - F.mean(dim=0)
+        # SVD for PCA
+        _, _, Vh = torch.linalg.svd(F_centered, full_matrices=False)
+        return Vh[:k].T # basis for top k subspace
+        
+    V_base = get_principal_subspace(F_base, k)
+    V_adapted = get_principal_subspace(F_adapted, k)
+    
+    # Cosines of principal angles are singular values of V1^T V2
+    M = V_base.T @ V_adapted
+    S = torch.linalg.svdvals(M)
+    
+    # Clip for numerical stability
+    S = torch.clamp(S, -1.0, 1.0)
+    angles = torch.acos(S) * (180.0 / np.pi)
+    
+    return torch.mean(angles).item()
+
+
+def compute_pairwise_distance_distortion(
+    F_base: torch.Tensor,
+    F_adapted: torch.Tensor
+) -> float:
+    """Compute Frobenius norm of distance matrix distortion.
+    
+    Args:
+        F_base: Base features [batch, dim]
+        F_adapted: Adapted features [batch, dim]
+        
+    Returns:
+        Relative Frobenius distortion
+    """
+    D_base = torch.cdist(F_base, F_base)
+    D_adapted = torch.cdist(F_adapted, F_adapted)
+    
+    distortion = torch.norm(D_base - D_adapted, p='fro')
+    base_norm = torch.norm(D_base, p='fro')
+    
+    return (distortion / (base_norm + 1e-10)).item()
+
+
+def compute_class_centroid_drift(
+    F_base: torch.Tensor,
+    F_adapted: torch.Tensor,
+    targets: torch.Tensor
+) -> float:
+    """Track semiconductor class stability via normalized centroid drift.
+    
+    Args:
+        F_base: Base features [batch, dim]
+        F_adapted: Adapted features [batch, dim]
+        targets: Target labels [batch]
+        
+    Returns:
+        Average centroid drift normalized by feature variance
+    """
+    unique_classes = torch.unique(targets)
+    drifts = []
+    
+    # Compute global variance for normalization across all dimensions
+    total_var = torch.var(F_base.flatten())
+    
+    for c in unique_classes:
+        mask = (targets == c)
+        if mask.any():
+            centroid_base = F_base[mask].mean(dim=0)
+            centroid_adapted = F_adapted[mask].mean(dim=0)
+            
+            drift = torch.norm(centroid_base - centroid_adapted)
+            drifts.append(drift)
+            
+    if not drifts:
+        return 0.0
+        
+    avg_drift = torch.mean(torch.stack(drifts))
+    # Normalize by std to make it scale-invariant
+    return (avg_drift / (torch.sqrt(total_var) + 1e-10)).item()
+
+
 def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
     """Count model parameters.
     

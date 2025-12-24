@@ -1,10 +1,10 @@
 {
   "exp_name": "R1.2_lora_r8_seed42",
   "exp_id": "R1.2",
-  "timestamp": "2025-12-23T18:59:37.292589",
+  "timestamp": "2025-12-23T21:05:56.068020",
   "config": {
     "experiment": {
-      "name": "resnet18_lora_r8_even_odd",
+      "name": "resnet18_lora_r8_even_odd_CM",
       "phase": 1,
       "exp_id": "R1.2",
       "seeds": [
@@ -32,8 +32,8 @@
       "warmup_epochs": 5,
       "early_stopping_patience": 5,
       "early_stopping_delta": 0.01,
-      "skip_stage1": false,
-      "stage1_checkpoint": ""
+      "skip_stage1": true,
+      "stage1_checkpoint": "./results/checkpoints/R1.2_resnet18_lora_r8_even_odd_seed42/stage1_best.pt"
     },
     "logging": {
       "use_wandb": true,
