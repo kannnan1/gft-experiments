@@ -139,6 +139,13 @@ def get_dataset(
             # Classes >= 5 -> 1, Classes < 5 -> 0
             class_mapping = {i: (1 if i >= 5 else 0) for i in range(10)}
             dataset = BinaryTaskDataset(dataset, class_mapping)
+        elif task_type == 'cifar10_p':
+            # Classes >= 5 -> 1, Classes < 5 -> 0
+            class_mapping = {
+                0: 6, 1: 2, 2: 9, 3: 0, 4: 8,
+                5: 1, 6: 3, 7: 4, 8: 7, 9: 5
+            }
+            dataset = BinaryTaskDataset(dataset, class_mapping)
     
     elif dataset_name == 'cifar100':
         transform = get_cifar100_transforms(train=train)
@@ -257,6 +264,8 @@ def get_num_classes(dataset_name: str, task_type: Optional[str] = None) -> int:
     elif task_type == 'coarse':
         return 20
     elif dataset_name == 'cifar10':
+        return 10
+    elif task_type == 'cifar10_p':
         return 10
     elif dataset_name == 'cifar100':
         return 100

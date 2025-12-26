@@ -1,36 +1,38 @@
 # R1.2: ResNet-18 LoRA r=8 on CIFAR-10 Even/Odd (DONE ✅)
 
 experiment:
-  name: "resnet18_lora_r8_even_odd_New"
+  name: "resnet50_lora_r8_cifar100-coarse"
   phase: 1
   exp_id: "R1.2"
   seeds: [42]
 
 model:
-  architecture: "resnet18"
+  architecture: "resnet50"
   method: "lora"
   rank: 8
   pretrained: true
 
 data:
-  base_task: "cifar10"
-  adapt_task: "even_odd"
+  base_task: "cifar100"
+  adapt_task: "coarse"
   batch_size: 4096
   num_workers: 4
 
 training:
-  epochs: 30
-  learning_rate: 0.0001
-  optimizer: "adamw"
+  epochs: 20
+  learning_rate: 0.001
+  optimizer: "sgd"
   weight_decay: 0.01
   scheduler: "cosine"
-  warmup_epochs: 5
+  warmup_epochs: 0
   
   early_stopping_patience : 10
   early_stopping_delta : 0.01
 
-  skip_stage1: true
-  stage1_checkpoint: "./results/checkpoints/R1.2_resnet18_lora_r8_even_odd_seed42/stage1_best.pt"
+  skip_stage1: false
+  skip_stage2: true
+  continue_from_stage1: true
+  stage1_checkpoint: "results/checkpoints/R1.2_resnet50_lora_r8_cifar100-coarse_seed42/stage1_final.pt"
 
 
 logging:
